@@ -34,6 +34,18 @@ A PowerShell-based real-time monitoring dashboard for SQL Server that collects a
 - **SQL Server Authentication** or **Windows Authentication** enabled
 - **User account** with appropriate permissions (see Permissions section)
 
+### Software Dependencies
+- **ImportExcel PowerShell Module**: Required for Excel export functionality.
+  - **Installation Command**:
+    ```powershell
+    Install-Module -Name ImportExcel -Scope CurrentUser
+    ```
+
+   - **Verification Command**:
+    ```powershell
+    Get-Module -ListAvailable -Name ImportExcel
+    ```
+
 ---
 
 ## Installation
@@ -178,34 +190,44 @@ GO
 
 ### Running the Dashboard
 
-1. **Open PowerShell**
+1. **Install Required Module**
+   ```powershell
+   Install-Module -Name ImportExcel -Scope CurrentUser
+   ```
+
+   **Verify installation with**
+   ```powershell
+   Get-Module -ListAvailable -Name ImportExcel
+   ```
+
+2. **Open PowerShell**
    ```powershell
    # Right-click PowerShell and select "Run as Administrator" (if needed)
    ```
 
-2. **Set Execution Policy** (First time only)
+3. **Set Execution Policy** (First time only)
    ```powershell
    Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
    ```
 
-3. **Navigate to Script Location**
+4. **Navigate to Script Location**
    ```powershell
    cd "C:\Path\To\Script"
    ```
 
-4. **Run the Script**
+5. **Run the Script**
    ```powershell
    .\SqlTwinInspector.ps1
    ```
 
-5. **Dashboard Opens Automatically**
+6. **Dashboard Opens Automatically**
    - The GUI will launch and display metrics from all configured servers
    - Data refreshes automatically every 60 seconds
    - Status bar shows last refresh time
 
 ### Exporting Data
 
-1. Click **"Export All to CSV"** button at the bottom
+1. Click **"Export Excel"** button at the bottom
 2. Choose save location and filename
 3. CSV file contains all metrics from all servers with timestamps
 
@@ -362,6 +384,8 @@ Write-Host "  [DEBUG]" ...
 - **State**: ONLINE, OFFLINE, etc.
 - **RecoveryModel**: FULL, SIMPLE, BULK_LOGGED
 - **CompatibilityLevel**: Database compatibility level
+- **ReadCommittedSnapshot**: Indicates if Read Committed Snapshot Isolation is enabled (On/Off)
+- **SnapshotIsolation**: Indicates if Snapshot Isolation is enabled (Off, In Transition to On, On)
 
 ### Logins
 - All SQL Server logins (SQL and Windows)
