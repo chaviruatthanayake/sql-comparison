@@ -1,5 +1,5 @@
 # SQL Server Metrics Dashboard - Enhanced Version
-# Features: Better UI, Auto-refresh, Improved Excel export with sheets
+# Features: Better UI, Auto-refresh, Improved Excel export with sheets, Expand/Collapse for Databases
 
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
     Start-Process powershell -ArgumentList @('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"") -Wait
@@ -14,12 +14,13 @@ Add-Type -AssemblyName System.Drawing
 
 $script:servers = @(
     @{ Name='Local SQL Server'; Instance='.\SQLEXPRESS'; UseWindowsAuth=$true; Username=''; Password='' },
-    @{ Name='EC2 SQL Server'; Instance='EC2_public_ip,1433'; UseWindowsAuth=$false; Username='USERNAME'; Password='PASSWORD' }
+    @{ Name='EC2 SQL Server'; Instance='EC2_PUBLIC_IP,1433'; UseWindowsAuth=$false; Username='USERNAME'; Password='PASSWORD' }
 )
 
 $script:refreshTimer = $null
 $script:currentForm = $null
 $script:allMetrics = @{}
+$script:isDatabasesExpanded = $false
 
 function Get-SqlConnectionString {
     param($ServerConfig)
@@ -138,38 +139,39 @@ function Get-ServerMetrics {
             $cn.Open()
             
             $cm = $cn.CreateCommand()
-            $cm.CommandText = "SELECT cpu_count FROM sys.dm_os_sys_info"
+            $cm.CommandText = "SELECT cpu_count AS LogicalCPUs FROM sys.dm_os_sys_info"
             $cpuCount = $cm.ExecuteScalar()
             
-            $cm.CommandText = "SELECT physical_memory_kb FROM sys.dm_os_sys_info"
+            $cm.CommandText = "SELECT physical_memory_kb/1024 AS PhysicalMemoryMB FROM sys.dm_os_sys_info"
             $physMem = $cm.ExecuteScalar()
             
             $cn.Close()
             
-            if ($cpuCount -ne $null) {
+            if ($cpuCount -ne $null -or $physMem -ne $null) {
                 $cpuMemory = @([PSCustomObject][ordered]@{
                     ServerSource = $ServerConfig.Name
-                    LogicalCPUs = $cpuCount
+                    LogicalCPUs = if ($cpuCount) { $cpuCount } else { "N/A" }
                     HyperthreadRatio = "N/A"
-                    PhysicalMemoryMB = if ($physMem) { [math]::Round($physMem/1024, 2) } else { "N/A" }
+                    PhysicalMemoryMB = if ($physMem) { [math]::Round($physMem, 2) } else { "N/A" }
                     CommittedMemoryMB = "N/A"
                     CommittedTargetMB = "N/A"
                 })
             }
         } catch {
             Write-Host "  [DEBUG] Alternative method also failed: $($_.Exception.Message)" -ForegroundColor Gray
+            $cpuMemory = @([PSCustomObject][ordered]@{
+                ServerSource = $ServerConfig.Name
+                LogicalCPUs = "DMV not accessible"
+                HyperthreadRatio = "DMV not accessible"
+                PhysicalMemoryMB = "DMV not accessible"
+                CommittedMemoryMB = "DMV not accessible"
+                CommittedTargetMB = "DMV not accessible"
+            })
         }
-    }
-    
-    if ($cpuMemory.Count -eq 0 -or $cpuMemory -eq $null) {
-        $cpuMemory = @([PSCustomObject][ordered]@{
-            ServerSource = $ServerConfig.Name
-            LogicalCPUs = "DMV not accessible"
-            HyperthreadRatio = "DMV not accessible"
-            PhysicalMemoryMB = "DMV not accessible"
-            CommittedMemoryMB = "DMV not accessible"
-            CommittedTargetMB = "DMV not accessible"
-        })
+    } else {
+        foreach ($item in $cpuMemory) {
+            $item | Add-Member -NotePropertyName "ServerSource" -NotePropertyValue $ServerConfig.Name
+        }
     }
     
     $metrics['CPUMemory'] = $cpuMemory
@@ -228,12 +230,12 @@ function Update-MetricsDisplay {
     foreach ($tab in $Form.Controls[0].TabPages) {
         $splitContainer = $tab.Controls[0]
         
-        # Update left panel (first server)
+        # Update left panel (second server - EC2 SQL Server)
         if ($splitContainer.Panel1.Controls.Count -gt 0) {
             $panel1 = $splitContainer.Panel1.Controls[0]
             $grid1 = $panel1.Controls | Where-Object { $_ -is [System.Windows.Forms.DataGridView] } | Select-Object -First 1
-            if ($grid1 -and $AllMetrics.Count -gt 0) {
-                $serverName1 = ($AllMetrics.Keys | Sort-Object)[0]
+            if ($grid1 -and $AllMetrics.Count -gt 1) {
+                $serverName1 = ($AllMetrics.Keys | Sort-Object)[1]  # EC2 SQL Server
                 $metricKey = $tab.Text -replace ' ', ''
                 $keyMap = @{
                     'ServerInfo'='ServerInfo'
@@ -251,17 +253,37 @@ function Update-MetricsDisplay {
                     $data1 = @($AllMetrics[$serverName1][$metricKey])
                     $arrayList1.AddRange($data1)
                     $grid1.DataSource = $arrayList1
+                    
+                    # Adjust columns for all tabs
+                    $grid1.AutoSizeColumnsMode = "AllCells"
+                    foreach ($col in $grid1.Columns) {
+                        $col.MinimumWidth = 100
+                        if ($col.Width -lt 100) { $col.Width = 100 }
+                        if ($col.Width -gt 300) { $col.Width = 300 }
+                    }
+                    
+                    # Special handling for Databases tab
+                    if ($tab.Text -eq 'Databases') {
+                        if ($script:isDatabasesExpanded) {
+                            $grid1.Columns | ForEach-Object { $_.Visible = $true }
+                        } else {
+                            $grid1.Columns | ForEach-Object { $_.Visible = $false }
+                            $grid1.Columns['DatabaseName'].Visible = $true
+                            $grid1.Columns['ServerSource'].Visible = $true
+                            $grid1.Columns['SizeMB'].Visible = $true
+                        }
+                    }
                     $grid1.Refresh()
                 }
             }
         }
         
-        # Update right panel (second server)
+        # Update right panel (first server - Local SQL Server)
         if ($splitContainer.Panel2.Controls.Count -gt 0) {
             $panel2 = $splitContainer.Panel2.Controls[0]
             $grid2 = $panel2.Controls | Where-Object { $_ -is [System.Windows.Forms.DataGridView] } | Select-Object -First 1
-            if ($grid2 -and $AllMetrics.Count -gt 1) {
-                $serverName2 = ($AllMetrics.Keys | Sort-Object)[1]
+            if ($grid2 -and $AllMetrics.Count -gt 0) {
+                $serverName2 = ($AllMetrics.Keys | Sort-Object)[0]  # Local SQL Server
                 $metricKey = $tab.Text -replace ' ', ''
                 $keyMap = @{
                     'ServerInfo'='ServerInfo'
@@ -279,6 +301,26 @@ function Update-MetricsDisplay {
                     $data2 = @($AllMetrics[$serverName2][$metricKey])
                     $arrayList2.AddRange($data2)
                     $grid2.DataSource = $arrayList2
+                    
+                    # Adjust columns for all tabs
+                    $grid2.AutoSizeColumnsMode = "AllCells"
+                    foreach ($col in $grid2.Columns) {
+                        $col.MinimumWidth = 100
+                        if ($col.Width -lt 100) { $col.Width = 100 }
+                        if ($col.Width -gt 300) { $col.Width = 300 }
+                    }
+                    
+                    # Special handling for Databases tab
+                    if ($tab.Text -eq 'Databases') {
+                        if ($script:isDatabasesExpanded) {
+                            $grid2.Columns | ForEach-Object { $_.Visible = $true }
+                        } else {
+                            $grid2.Columns | ForEach-Object { $_.Visible = $false }
+                            $grid2.Columns['DatabaseName'].Visible = $true
+                            $grid2.Columns['ServerSource'].Visible = $true
+                            $grid2.Columns['SizeMB'].Visible = $true
+                        }
+                    }
                     $grid2.Refresh()
                 }
             }
@@ -329,7 +371,7 @@ function Show-MetricsGUI {
 
     $tabOrder = @(
         @{Key='ServerInfo'; Name='Server Info'},
-        @{Key='CPUandMemory'; Name='CPU and Memory'},
+        @{Key='CPUMemory'; Name='CPU and Memory'},  # Explicitly map to CPUMemory
         @{Key='Configuration'; Name='Configuration'},
         @{Key='Databases'; Name='Databases'},
         @{Key='Logins'; Name='Logins'},
@@ -353,9 +395,9 @@ function Show-MetricsGUI {
 
         $serverNames = $AllMetrics.Keys | Sort-Object
 
-        # Left panel - First server
-        if ($serverNames.Count -gt 0) {
-            $serverName1 = $serverNames[0]
+        # Left panel - Second server (EC2 SQL Server)
+        if ($serverNames.Count -gt 1) {
+            $serverName1 = $serverNames[1]  # EC2 SQL Server
             $panel1 = New-Object System.Windows.Forms.Panel
             $panel1.Dock = "Fill"
             $splitContainer.Panel1.Controls.Add($panel1)
@@ -370,7 +412,7 @@ function Show-MetricsGUI {
             $grid1.ColumnHeadersVisible = $true
             $grid1.ColumnHeadersHeight = 60
             $grid1.ColumnHeadersHeightSizeMode = "DisableResizing"
-            $grid1.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::DarkBlue
+            $grid1.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::DarkGreen
             $grid1.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
             $grid1.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
             $grid1.ColumnHeadersDefaultCellStyle.Alignment = "MiddleCenter"
@@ -382,8 +424,8 @@ function Show-MetricsGUI {
             $grid1.Add_DataBindingComplete({
                 $this.AutoResizeColumns([System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::AllCells)
                 foreach ($col in $this.Columns) {
-                    $col.MinimumWidth = 120
-                    if ($col.Width -lt 120) { $col.Width = 120 }
+                    $col.MinimumWidth = 100
+                    if ($col.Width -lt 100) { $col.Width = 100 }
                     if ($col.Width -gt 300) { $col.Width = 300 }
                 }
             })
@@ -398,12 +440,13 @@ function Show-MetricsGUI {
                 $data1 = @($AllMetrics[$serverName1][$key])
                 $arrayList1.AddRange($data1)
                 $grid1.DataSource = $arrayList1
+                Write-Host "  [DEBUG] Populated $name grid1 with $($arrayList1.Count) rows" -ForegroundColor Gray
             }
         }
 
-        # Right panel - Second server
-        if ($serverNames.Count -gt 1) {
-            $serverName2 = $serverNames[1]
+        # Right panel - First server (Local SQL Server)
+        if ($serverNames.Count -gt 0) {
+            $serverName2 = $serverNames[0]  # Local SQL Server
             $panel2 = New-Object System.Windows.Forms.Panel
             $panel2.Dock = "Fill"
             $splitContainer.Panel2.Controls.Add($panel2)
@@ -418,7 +461,7 @@ function Show-MetricsGUI {
             $grid2.ColumnHeadersVisible = $true
             $grid2.ColumnHeadersHeight = 60
             $grid2.ColumnHeadersHeightSizeMode = "DisableResizing"
-            $grid2.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::DarkGreen
+            $grid2.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::DarkBlue
             $grid2.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
             $grid2.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
             $grid2.ColumnHeadersDefaultCellStyle.Alignment = "MiddleCenter"
@@ -430,8 +473,8 @@ function Show-MetricsGUI {
             $grid2.Add_DataBindingComplete({
                 $this.AutoResizeColumns([System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::AllCells)
                 foreach ($col in $this.Columns) {
-                    $col.MinimumWidth = 120
-                    if ($col.Width -lt 120) { $col.Width = 120 }
+                    $col.MinimumWidth = 100
+                    if ($col.Width -lt 100) { $col.Width = 100 }
                     if ($col.Width -gt 300) { $col.Width = 300 }
                 }
             })
@@ -446,6 +489,7 @@ function Show-MetricsGUI {
                 $data2 = @($AllMetrics[$serverName2][$key])
                 $arrayList2.AddRange($data2)
                 $grid2.DataSource = $arrayList2
+                Write-Host "  [DEBUG] Populated $name grid2 with $($arrayList2.Count) rows" -ForegroundColor Gray
             }
         }
         
@@ -512,6 +556,17 @@ function Show-MetricsGUI {
         $refreshBtn.Enabled = $true
     })
     $statusStrip.Items.Add($refreshBtn) | Out-Null
+
+    # Toggle Expand/Collapse button for Databases
+    $toggleBtn = New-Object System.Windows.Forms.ToolStripDropDownButton
+    $toggleBtn.Text = "Expand Databases"
+    $toggleBtn.DisplayStyle = "Text"
+    $toggleBtn.Add_Click({
+        $script:isDatabasesExpanded = -not $script:isDatabasesExpanded
+        $toggleBtn.Text = if ($script:isDatabasesExpanded) { "Collapse Databases" } else { "Expand Databases" }
+        Refresh-Data
+    })
+    $statusStrip.Items.Add($toggleBtn) | Out-Null
 
     # Setup auto-refresh timer (60 seconds)
     $script:refreshTimer = New-Object System.Windows.Forms.Timer
